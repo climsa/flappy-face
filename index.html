@@ -68,6 +68,22 @@
   .link { font: inherit; font-weight: 500; font-size: 14px; background: none; border: 0; padding: 0; color: var(--pipe-dark); text-decoration: underline; cursor: pointer; text-align: left; }
   .link:focus-visible { outline: 3px solid var(--ink); outline-offset: 3px; border-radius: 4px; }
 
+  .cal-ring { width: 148px; height: 148px; border-radius: 50%; padding: 4px; background: #EFE9DD; }
+  .cal-ring.ok { background: #8AE36B; }
+  .cal-ring.open { background: #FFD23F; }
+  #cal-preview { width: 140px; height: 140px; border-radius: 50%; background: #E2DBCB; display: block; }
+  .cal-steps { margin: 0; padding: 0; list-style: none; width: 100%; text-align: left; display: flex; flex-direction: column; gap: 8px; }
+  .cal-steps li { display: grid; grid-template-columns: 26px 1fr; column-gap: 8px; align-items: start; font-size: 15px; line-height: 1.35; opacity: .45; }
+  .cal-steps li::before { content: ""; width: 20px; height: 20px; border-radius: 50%; border: 3px solid var(--ink); margin-top: 1px; box-sizing: border-box; }
+  .cal-steps li b { font-weight: 700; display: block; }
+  .cal-steps li span { font-weight: 500; font-size: 13px; grid-column: 2; }
+  .cal-steps li.active { opacity: 1; }
+  .cal-steps li.active::before { background: var(--pipe); border-color: var(--pipe); }
+  .cal-steps li.done { opacity: .7; }
+  .cal-steps li.done::before { background: #8AE36B; border-color: #8AE36B; }
+  .cal-bar { width: 100%; height: 12px; border-radius: 6px; background: #EFE9DD; overflow: hidden; }
+  #cal-fill { height: 100%; width: 0; background: var(--cta); transition: width .1s linear; }
+
   .steps { margin: 0; padding-left: 22px; text-align: left; display: flex; flex-direction: column; gap: 10px; font-size: 15px; line-height: 1.4; font-weight: 500; }
   .steps li::marker { font-weight: 700; color: var(--pipe-dark); }
 
@@ -155,8 +171,25 @@
         <label for="sens"><span>Sensitivitas mulut</span><span id="sens-val">Normal</span></label>
         <input id="sens" type="range" min="0.2" max="0.6" step="0.05" value="0.35">
       </div>
-      <p class="small">Geser ke kiri kalau mulut terasa harus dibuka terlalu lebar. Garis merah muda di meter mulut saat main menunjukkan batasnya.</p>
+      <p class="small">Geser ke kiri kalau mulut terasa harus dibuka terlalu lebar. Garis merah muda di meter mulut saat main menunjukkan batasnya. Sebelum tiap permainan, game mengukur posisi mulut tertutupmu dulu.</p>
+      <p class="small" id="dbg">Kamera belum aktif</p>
+      <button type="button" class="btn quiet" id="btn-recal">Kalibrasi ulang saat main berikutnya</button>
       <button type="button" class="btn" id="btn-settings-back">Simpan &amp; kembali</button>
+    </div>
+  </section>
+
+  <section id="screen-cal" class="screen" hidden>
+    <div class="card">
+      <h1 style="font-size:30px">Kalibrasi mulut</h1>
+      <div class="cal-ring"><canvas id="cal-preview" width="140" height="140" aria-hidden="true"></canvas></div>
+      <ol class="cal-steps" aria-live="polite">
+        <li data-step="0"><b>Posisikan wajah</b><span>Hadapkan wajah lurus ke kamera sampai memenuhi lingkaran.</span></li>
+        <li data-step="1"><b>Tutup mulut</b><span>Tahan dengan mulut tertutup rapat.</span></li>
+        <li data-step="2"><b>Buka mulut lebar</b><span>Tahan dengan mulut terbuka selebar mungkin.</span></li>
+      </ol>
+      <div class="cal-bar"><div id="cal-fill"></div></div>
+      <p class="small" id="cal-msg">Menunggu wajah…</p>
+      <button type="button" class="link" id="btn-cal-skip">Lewati, pakai setelan standar</button>
     </div>
   </section>
 
@@ -207,27 +240,29 @@ const CFG = {
 };
 const WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
 const MODEL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
-const STORE = { best: "ff.best", mode: "ff.mode", sens: "ff.sens" };
+const STORE = { best: "ff.best", mode: "ff.mode", sens: "ff.sens3" };
 
 /* ---------- DOM ---------- */
 const $ = (s) => document.querySelector(s);
 const video = $("#cam");
 const canvas = $("#game");
 const ctx = canvas.getContext("2d");
-const screens = { start: $("#screen-start"), howto: $("#screen-howto"), settings: $("#screen-settings"), loading: $("#screen-loading"), over: $("#screen-over") };
+const screens = { start: $("#screen-start"), howto: $("#screen-howto"), settings: $("#screen-settings"), cal: $("#screen-cal"), loading: $("#screen-loading"), over: $("#screen-over") };
 const preview = $("#preview");
-const pctx = preview.getContext("2d");
+const calPreview = $("#cal-preview");
 const statusEl = $("#status");
 const toastEl = $("#toast");
 
 /* ---------- pengaturan ---------- */
 let mode = localStorage.getItem(STORE.mode) || "hold";
-let openThreshold = parseFloat(localStorage.getItem(STORE.sens) || "0.35");
+// openThreshold = fraksi dari rentang pribadi (tertutup → terbuka lebar) agar dianggap "terbuka"
+let openThreshold = parseFloat(localStorage.getItem(STORE.sens) || "0.45");
 let best = parseInt(localStorage.getItem(STORE.best) || "0", 10);
 
 const sensEl = $("#sens");
+sensEl.min = 0.25; sensEl.max = 0.75; sensEl.step = 0.05;
 sensEl.value = openThreshold;
-const sensLabel = (v) => (v <= 0.25 ? "Sangat peka" : v <= 0.35 ? "Normal" : v <= 0.45 ? "Agak lebar" : "Lebar");
+const sensLabel = (v) => (v <= 0.35 ? "Sangat peka" : v <= 0.5 ? "Normal" : v <= 0.6 ? "Agak lebar" : "Lebar");
 const updateSens = () => { openThreshold = parseFloat(sensEl.value); $("#sens-val").textContent = sensLabel(openThreshold); localStorage.setItem(STORE.sens, openThreshold); };
 sensEl.addEventListener("input", updateSens);
 updateSens();
@@ -288,6 +323,10 @@ let landmarker = null;
 const face = {
   seen: false, lastSeen: 0,
   jaw: 0,        // 0..1, sudah dihaluskan
+  raw: 0,        // nilai mentah frame terakhir
+  baseline: 0.1, // nilai saat mulut tertutup (hasil kalibrasi)
+  openMax: 0.6,  // nilai saat mulut terbuka lebar (hasil kalibrasi)
+  calibrated: false,
   open: false,   // hasil histeresis
   cx: 0.5, cy: 0.5, size: 0.3, // kotak wajah dalam koordinat video (0..1)
   vw: 0, vh: 0,
@@ -335,9 +374,16 @@ function detectLoop() {
       const dx = Math.hypot(lm[61].x - lm[291].x, lm[61].y - lm[291].y);
       jaw = Math.min(1, (dy / dx) * 1.6);
     }
+    face.raw = jaw;
     face.jaw += (jaw - face.jaw) * 0.5;
-    if (!face.open && face.jaw > openThreshold) face.open = true;
-    else if (face.open && face.jaw < openThreshold - 0.12) face.open = false;
+    if (cal.active) {
+      if (cal.step === 1 || cal.step === 2) cal.samples.push(jaw);
+      face.open = false;
+    } else {
+      const { openAt, closeAt } = thresholds();
+      if (!face.open && face.jaw > openAt) face.open = true;
+      else if (face.open && face.jaw < closeAt) face.open = false;
+    }
 
     let minX = 1, maxX = 0, minY = 1, maxY = 0;
     for (const p of lm) { if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x; if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y; }
@@ -390,6 +436,74 @@ const G = {
   t: 0,
 };
 
+/* ---------- kalibrasi terpandu: posisikan wajah → tutup mulut → buka lebar ---------- */
+const cal = { active: false, step: 0, t: 0, samples: [], msg: "", done: false };
+const CAL = { posDur: 0.8, holdDur: 1.4, minRange: 0.12, doneDur: 0.9 };
+
+function thresholds() {
+  const range = Math.max(0.1, face.openMax - face.baseline);
+  return { openAt: face.baseline + range * openThreshold, closeAt: face.baseline + range * openThreshold * 0.5 };
+}
+function faceWellPlaced() {
+  return face.seen && face.size > 0.16 && face.size < 0.7 && Math.abs(face.cx - 0.5) < 0.22 && Math.abs(face.cy - 0.5) < 0.28;
+}
+function percentile(arr, p) { const s = arr.slice().sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(s.length * p))]; }
+
+function startCalibration() {
+  Object.assign(cal, { active: true, step: 0, t: 0, samples: [], msg: "Menunggu wajah…", done: false });
+  face.open = false;
+  show("cal");
+}
+function calNext() { cal.step++; cal.t = 0; cal.samples = []; }
+function finishCalibration() {
+  cal.active = false; face.calibrated = true; face.open = false;
+  input.flapQueued = false; input.prevOpen = false;
+  show(null);
+}
+function skipCalibration() {
+  face.baseline = 0.1; face.openMax = 0.6;
+  finishCalibration();
+}
+
+// dipanggil tiap tick fisika selama layar kalibrasi tampil
+function updateCalibration(dt) {
+  if (cal.done) { cal.t += dt; if (cal.t >= CAL.doneDur) finishCalibration(); return; }
+  if (!face.seen) { cal.msg = "Wajah tidak terlihat — hadapkan ke kamera"; if (cal.step > 0) cal.t = 0; return; }
+
+  if (cal.step === 0) {
+    if (faceWellPlaced()) { cal.t += dt; cal.msg = "Bagus, tahan posisi…"; }
+    else { cal.t = 0; cal.msg = face.size <= 0.16 ? "Dekatkan wajah ke kamera" : face.size >= 0.7 ? "Jauhkan wajah sedikit" : "Geser wajah ke tengah lingkaran"; }
+    if (cal.t >= CAL.posDur) { calNext(); cal.msg = "Sekarang tutup mulut rapat dan tahan"; }
+  } else if (cal.step === 1) {
+    cal.t += dt; cal.msg = "Tutup mulut… tahan";
+    if (cal.t >= CAL.holdDur) { face.baseline = percentile(cal.samples, 0.3); calNext(); cal.msg = "Sekarang buka mulut selebar mungkin dan tahan"; }
+  } else if (cal.step === 2) {
+    cal.t += dt; cal.msg = "Buka lebar… tahan";
+    if (cal.t >= CAL.holdDur) {
+      const openMax = percentile(cal.samples, 0.7);
+      if (openMax - face.baseline < CAL.minRange) {
+        cal.step = 1; cal.t = 0; cal.samples = [];
+        cal.msg = "Perbedaan terlalu kecil. Ulangi: tutup mulut rapat dulu.";
+      } else {
+        face.openMax = openMax;
+        cal.done = true; cal.t = 0; cal.msg = "Siap! Buka mulut untuk mulai.";
+      }
+    }
+  }
+}
+
+function renderCalibration() {
+  const steps = document.querySelectorAll(".cal-steps li");
+  steps.forEach((li, i) => { li.classList.toggle("done", cal.done || i < cal.step); li.classList.toggle("active", !cal.done && i === cal.step); });
+  const dur = cal.step === 0 ? CAL.posDur : CAL.holdDur;
+  $("#cal-fill").style.width = (cal.done ? 100 : Math.min(100, (cal.t / dur) * 100)) + "%";
+  $("#cal-msg").textContent = cal.msg;
+  const ring = $(".cal-ring");
+  ring.classList.toggle("ok", cal.step === 0 && faceWellPlaced() || cal.done);
+  ring.classList.toggle("open", cal.step === 2 && face.seen);
+  drawFaceInto(calPreview, cal.step === 2 && face.seen);
+}
+
 function resetGame() {
   G.state = "ready";
   G.bird.x = W * CFG.birdX; G.bird.y = H * 0.45; G.bird.vy = 0;
@@ -439,6 +553,7 @@ function update(dt) {
   if (G.milestoneT > 0) G.milestoneT -= dt;
   G.groundOffset = (G.groundOffset + CFG.speedStart * 0.5 * dt) % 40;
   if (G.state === "idle") { G.bird.x = W * CFG.birdX; G.bird.y = H * 0.45 + Math.sin(G.t * 3) * 8; return; }
+  if (cal.active) { G.bird.y = H * 0.45 + Math.sin(G.t * 3) * 8; updateCalibration(dt); return; }
   if (G.state === "dead") return;
 
   // wajah hilang → jeda
@@ -612,17 +727,18 @@ function drawHUD() {
   // meter mulut: pojok kanan atas
   const mw = 14, mh = 110, mx = W - 30, my = top + 6;
   ctx.fillStyle = "rgba(42,33,66,.35)"; roundRect(mx - mw / 2, my, mw, mh, 7); ctx.fill();
-  const lvl = Math.min(1, face.jaw / 0.8);
+  const range = 0.6;
+  const lvl = Math.max(0, Math.min(1, (face.jaw - face.baseline) / range));
   ctx.fillStyle = face.open ? "#8AE36B" : "#FFFCF5";
   roundRect(mx - mw / 2, my + mh * (1 - lvl), mw, mh * lvl, 7); ctx.fill();
-  const ty = my + mh * (1 - Math.min(1, openThreshold / 0.8));
+  const ty = my + mh * (1 - Math.min(1, openThreshold / range));
   ctx.fillStyle = "#FF6B9A"; ctx.fillRect(mx - mw / 2 - 5, ty - 1, mw + 10, 3);
   if (!face.seen) { ctx.fillStyle = "#FF6B9A"; ctx.beginPath(); ctx.arc(mx, my + mh + 14, 5, 0, Math.PI * 2); ctx.fill(); }
 
   if (G.state === "ready") {
     ctx.font = "700 22px " + getComputedStyle(document.body).fontFamily;
     ctx.textAlign = "center";
-    const msg = face.seen ? "Buka mulut untuk mulai" : "Hadapkan wajah ke kamera";
+    const msg = !face.seen ? "Hadapkan wajah ke kamera" : "Buka mulut untuk mulai";
     ctx.lineWidth = 6; ctx.strokeStyle = "#2A2142";
     const y = H * 0.62 + Math.sin(G.t * 4) * 3;
     ctx.strokeText(msg, W / 2, y); ctx.fillStyle = "#FFFCF5"; ctx.fillText(msg, W / 2, y);
@@ -655,22 +771,31 @@ function render() {
   if (G.flash > 0) { ctx.globalAlpha = Math.min(0.6, G.flash); ctx.fillStyle = G.flashColor; ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1; }
   if (G.state !== "idle") drawHUD();
   if (G.paused) { ctx.fillStyle = "rgba(42,33,66,.35)"; ctx.fillRect(0, 0, W, H); }
-  if (!screens.start.hidden) drawPreview();
+  if (!screens.start.hidden) drawFaceInto(preview, face.open);
+  if (!screens.cal.hidden) renderCalibration();
+  if (!screens.settings.hidden && face.vw) {
+    const { openAt } = thresholds();
+    $("#dbg").textContent = face.seen
+      ? `Nilai mulut: ${face.jaw.toFixed(2)} · tertutup: ${face.baseline.toFixed(2)} · lebar: ${face.openMax.toFixed(2)} · terbuka di: ${openAt.toFixed(2)}${face.open ? " · TERBUKA" : ""}${face.calibrated ? "" : " · belum dikalibrasi"}`
+      : "Wajah tidak terdeteksi";
+  }
 }
-function drawPreview() {
-  const s = preview.width;
-  pctx.clearRect(0, 0, s, s);
+// gambar potongan wajah (dicerminkan) ke kanvas kecil; ring hijau = umpan balik "terbuka"
+function drawFaceInto(cv, highlight) {
+  const c = cv.getContext("2d"), s = cv.width;
+  c.clearRect(0, 0, s, s);
   if (!face.vw || !face.lastSeen) return;
   const side = Math.max(0.12, face.size * 1.45) * face.vw;
   const sx = face.cx * face.vw - side / 2, sy = face.cy * face.vh - side / 2;
-  pctx.save();
-  pctx.beginPath(); pctx.arc(s / 2, s / 2, s / 2, 0, Math.PI * 2); pctx.clip();
-  pctx.translate(s, 0); pctx.scale(-1, 1);
-  pctx.drawImage(video, sx, sy, side, side, 0, 0, s, s);
-  pctx.restore();
-  // cincin hijau saat mulut terbuka: umpan balik bahwa deteksi bekerja
-  pctx.lineWidth = 6; pctx.strokeStyle = face.open ? "#8AE36B" : "rgba(0,0,0,0)";
-  pctx.beginPath(); pctx.arc(s / 2, s / 2, s / 2 - 3, 0, Math.PI * 2); pctx.stroke();
+  c.save();
+  c.beginPath(); c.arc(s / 2, s / 2, s / 2, 0, Math.PI * 2); c.clip();
+  c.translate(s, 0); c.scale(-1, 1);
+  c.drawImage(video, sx, sy, side, side, 0, 0, s, s);
+  c.restore();
+  if (highlight) {
+    c.lineWidth = 6; c.strokeStyle = "#8AE36B";
+    c.beginPath(); c.arc(s / 2, s / 2, s / 2 - 3, 0, Math.PI * 2); c.stroke();
+  }
 }
 
 /* ---------- game loop: fixed timestep 60 Hz ---------- */
@@ -732,8 +857,11 @@ async function play() {
   ensureAudio();
   if (!(await boot())) return;
   resetGame();
-  show(null);
+  if (face.calibrated) show(null);
+  else startCalibration();          // layar terpandu; show(null) dipanggil saat selesai
 }
+$("#btn-cal-skip").addEventListener("click", skipCalibration);
+$("#btn-recal").addEventListener("click", () => { face.calibrated = false; toast("Kalibrasi akan diulang saat tekan Main"); });
 function goMenu() {
   G.state = "idle";
   updateMenu();
